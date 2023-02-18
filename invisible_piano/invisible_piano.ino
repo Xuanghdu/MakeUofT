@@ -30,6 +30,8 @@ int calc_dist() {
 
 #if MODE==KBD_MODE
 int dist_to_freq(int dist, int start_dist, int end_dist, int* freq_table) {
+  //Serial.print("Distance: ");
+  //Serial.println(dist);
   if (dist < start_dist || dist > end_dist) {
     return -1;
   }
@@ -50,7 +52,7 @@ int dist_to_freq(int dist, int start_dist, int end_dist, int min_freq, int max_f
 
   int dist_range = end_dist - start_dist;
   int freq_range = max_freq - min_freq;
-  return (dist - start_dist) / dist_range * freq_range + min_freq;
+  return int((float)(dist - start_dist) / float(dist_range) * freq_range + min_freq);
 }
 #endif
 
@@ -60,15 +62,15 @@ int calc_freq() {
   //Serial.print("Distance: ");
   //Serial.println(dist);
 
-  int start_dist = 10, end_dist = 130;
+  int start_dist = 50, end_dist = 650;
 
-  #if MODE==KBD_MODE
+#if MODE==KBD_MODE
   int freq_table[12] = {131,139,147,156,165,175,185,196,208,220,233,247};
   return dist_to_freq(dist, start_dist, end_dist, freq_table);
-  #elif MODE==TRB_MODE
+#elif MODE==TRB_MODE
   int min_freq = 131, max_freq = 262;
   return dist_to_freq(dist, start_dist, end_dist, min_freq, max_freq);
-  #endif
+#endif
 }
 
 // https://arduinogetstarted.com/tutorials/arduino-force-sensor
@@ -92,10 +94,12 @@ void setup() {
 void loop() {
   int base_freq = calc_freq();
   int octave = force2octave();
+  //Serial.print("Octave: ");
+  //Serial.println(octave); 
   //Serial.print(force2octave());
   int final_freq = base_freq << octave;
   Serial.print("Final freq: ");
-  Serial.print(final_freq);
+  Serial.println(final_freq);
 
   delay(200);
 }
