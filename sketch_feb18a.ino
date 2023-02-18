@@ -17,5 +17,6 @@ int force2octave() {
 }
 
 void loop() {
+  Serial.print(force2octave());
   delay(200);
 }
