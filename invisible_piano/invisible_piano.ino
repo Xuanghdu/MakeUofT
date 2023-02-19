@@ -1,148 +1,200 @@
-#define FORCE_SENSOR_PIN A0  // the FSR and 10K pulldown are connected to A0
+////////////////////////////////////////////////////////////////////////////////
+// Tone
+////////////////////////////////////////////////////////////////////////////////
 
-// define mode
-#define KBD_MODE 0
-#define TRB_MODE 1
+#define TONE_HARMONY_CHANNELS 1
 
-//#define MODE TRB_MODE
+const uint32_t toneClockSelection = TC_CMR_TCCLKS_TIMER_CLOCK4;
+const uint32_t toneClockDivisor = 128;
+const uint32_t toneOutputPin = DAC1;
 
-#define TONE_TIMER_SELECTION TC_CMR_TCCLKS_TIMER_CLOCK4
-#define TONE_TIMER_DIVISOR 128
-#define TONE_PIN 8
-#define WHOLE_NOTE_DURATION 1000
+void setHarmonyChannel(uint32_t channel, uint32_t value) {
+  static volatile uint32_t channelValues[TONE_HARMONY_CHANNELS] = {};
+  channelValues[channel] = value;
+  uint32_t valueSum = 0;
+  for (uint32_t i = 0; i < TONE_HARMONY_CHANNELS; ++i) {
+    valueSum += channelValues[i];
+  }
+  analogWrite(toneOutputPin, min(valueSum, 4095));
+}
+
+static volatile uint32_t harmonyChannelAmplitudes[TONE_HARMONY_CHANNELS] = {};
+
+class Tone {
+public:
+  void init(uint32_t clockID, Tc* tcPtr, uint32_t tcChannel, uint32_t harmonyChannel) {
+    pmc_enable_periph_clk(clockID);
+    TC_Configure(tcPtr, tcChannel, toneClockSelection | TC_CMR_WAVE | TC_CMR_WAVSEL_UP_RC);
+    tcPtr->TC_CHANNEL[tcChannel].TC_IER = TC_IER_CPCS;
+    tcPtr->TC_CHANNEL[tcChannel].TC_IDR = ~TC_IER_CPCS;
+    NVIC_EnableIRQ((IRQn_Type)clockID);
+    tcPtr_ = tcPtr;
+    tcChannel_ = tcChannel;
+    harmonyChannel_ = harmonyChannel;
+  }
+
+  void set(uint32_t frequency, uint32_t amplitude) {
+    TC_Stop(tcPtr_, tcChannel_);
+    if (frequency == 0 || amplitude == 0) {
+      setHarmonyChannel(harmonyChannel_, 0);
+      return;
+    }
+    harmonyChannelAmplitudes[harmonyChannel_] = amplitude;
+    TC_SetRC(tcPtr_, tcChannel_, VARIANT_MCK / toneClockDivisor / frequency / 2);
+    TC_Start(tcPtr_, tcChannel_);
+  }
+
+private:
+  Tc* tcPtr_;
+  uint32_t tcChannel_;
+  uint32_t harmonyChannel_;
+};
+
+#define DEFINE_TC_HANDLER(handlerName, tcPtr, toChannel, harmonyChannel) \
+  extern void handlerName(); \
+  void handlerName() { \
+    static uint32_t pinState = 0; \
+    TC_GetStatus(tcPtr, toChannel); \
+    pinState = 1 - pinState; \
+    setHarmonyChannel(harmonyChannel, pinState* harmonyChannelAmplitudes[harmonyChannel]); \
+  }
+
+DEFINE_TC_HANDLER(TC3_Handler, TC1, 0, 0)
+
+static Tone harmonyTones[TONE_HARMONY_CHANNELS] = {};
+
+void initializeTones() {
+  pmc_set_writeprotect(false);
+  analogWriteResolution(12);
+  harmonyTones[0].init(ID_TC3, TC1, 0, 0);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Sensor
+////////////////////////////////////////////////////////////////////////////////
 
 // defines pins numbers
-const int trigPin = 6;
-const int echoPin = 7;
-const int buttonPin = 2;
-const unsigned long timeout = 1000000l;  // default is 1 second (1000000 us)
-int mode = 0, button_state, prev_button_state;
+const uint32_t modeButtonPin = 2;
+const uint32_t forceSensorPin = A0;  // the FSR and 10K pulldown are connected to A0
+const uint32_t ultrasonicTrigPin = 6;
+const uint32_t ultrasonicEchoPin = 7;
+const uint32_t ultrasonicTimeout = 100000;  // default is 1 second (1000000 us)
+const uint32_t minSoundDistance = 100;
+const uint32_t maxSoundDistance = 1300;
+const uint32_t baseNoteFrequencies[] = { 523, 554, 587, 622, 659, 698, 740, 784, 831, 880, 932, 988 };
+// Backup base frequencies: { 131, 139, 147, 156, 165, 175, 185, 196, 208, 220, 233, 247 }
+//                          { 262, 277, 294, 311, 330, 349, 370, 392, 415, 440, 466, 494 }
 
-int calc_dist() {
-  int duration, distance;
-  // Clears the trigPin
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  // Sets the trigPin on HIGH state for 10 micro seconds
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  // Reads the echoPin, returns the sound wave travel time in microseconds
-  // If no pulse is received before the timeout, returns 0
-  duration = pulseIn(echoPin, HIGH, timeout);
-  // Calculating the distance in cm
-  distance = duration * 0.34 / 2;
-  return distance;
-}
+#define NOTE_C5 523
+#define NOTE_CS5 554
+#define NOTE_D5 587
+#define NOTE_DS5 622
+#define NOTE_E5 659
+#define NOTE_F5 698
+#define NOTE_FS5 740
+#define NOTE_G5 784
+#define NOTE_GS5 831
+#define NOTE_A5 880
+#define NOTE_AS5 932
+#define NOTE_B5 988
 
-int dist_to_freq_kbd(int dist, int start_dist, int end_dist, int* freq_table) {
-  //Serial.print("Distance: ");
-  //Serial.println(dist);
-  if (dist < start_dist || dist > end_dist) {
-    return -1;
-  }
-
-  // calculate bucket size and bucket number based on start and end distance
-  int bucket_size = (end_dist - start_dist) / 12;
-  int bucket_num = (dist - start_dist) / bucket_size;
-
-  // prevent rounding errors from division causing array to go out of bound
-  bucket_num = min(bucket_num, 11);
-  return freq_table[bucket_num];
-}
-
-int dist_to_freq_trb(int dist, int start_dist, int end_dist, int min_freq, int max_freq) {
-  if (dist < start_dist || dist > end_dist) {
-    return -1;
-  }
-
-  int dist_range = end_dist - start_dist;
-  int freq_range = max_freq - min_freq;
-  return int((float)(dist - start_dist) / float(dist_range) * freq_range + min_freq);
-}
-
-int calc_freq() {
-  int dist = calc_dist();
-
-  //Serial.print("Distance: ");
-  //Serial.println(dist);
-
-  int start_dist = 100, end_dist = 1300;
-
-  if (mode == KBD_MODE) {
-    int freq_table[12] = { 131, 139, 147, 156, 165, 175, 185, 196, 208, 220, 233, 247 };
-    return dist_to_freq_kbd(dist, start_dist, end_dist, freq_table);
-  } else {  // MODE == TRB_MODE
-    int min_freq = 131, max_freq = 262;
-    return dist_to_freq_trb(dist, start_dist, end_dist, min_freq, max_freq);
-  }
-}
+enum SoundMode {
+  DISCRETE_MODE = 0,
+  CONTINUOUS_MODE = 1
+} soundMode = DISCRETE_MODE;
 
 // https://arduinogetstarted.com/tutorials/arduino-force-sensor
-int force2octave() {
-  int analogReading = analogRead(FORCE_SENSOR_PIN);
-  // Serial.print(analogReading); // print the raw analog reading
-  if (analogReading < 24)
+uint32_t getOctaveFromForce() {
+  uint32_t forceReading = analogRead(forceSensorPin);
+  // Serial.print("Force reading: ");
+  // Serial.println(forceReading);
+  if (forceReading < 24) {
     return 0;
-  else if (analogReading > 1000)
+  } else if (forceReading > 1000) {
     return 2;
-  else
+  } else {
     return 1;
+  }
 }
+
+uint32_t getBaseFrequencyFromDistance() {
+  uint32_t distance = detectDistance();
+  // Serial.print("Distance: ");
+  // Serial.println(distance);
+  switch (soundMode) {
+    case DISCRETE_MODE:
+      return distanceToBaseFrequencyDiscrete(distance);
+    case CONTINUOUS_MODE:
+      return distanceToBaseFrequencyContinuous(distance);
+    default:
+      return 0;
+  }
+}
+
+uint32_t detectDistance() {
+  // Clears the ultrasonicTrigPin
+  digitalWrite(ultrasonicTrigPin, LOW);
+  delayMicroseconds(2);
+  // Sets the ultrasonicTrigPin on HIGH state for 10 microseconds
+  digitalWrite(ultrasonicTrigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(ultrasonicTrigPin, LOW);
+  // Reads the ultrasonicEchoPin, returns the sound wave travel time in microseconds
+  // If no pulse is received before the timeout, returns 0
+  uint32_t duration = pulseIn(ultrasonicEchoPin, HIGH, ultrasonicTimeout);
+  // Calculating the distance in centimeters
+  return (uint32_t)(duration * (0.34 / 2));
+}
+
+uint32_t distanceToBaseFrequencyDiscrete(uint32_t distance) {
+  // Serial.print("Distance (discrete): ");
+  // Serial.println(distance);
+  if (distance < minSoundDistance || distance > maxSoundDistance) {
+    return 0;
+  }
+  uint32_t noteIndex = 12 * (distance - minSoundDistance) / (maxSoundDistance - minSoundDistance);
+  noteIndex = min(noteIndex, 12 - 1);
+  return baseNoteFrequencies[noteIndex];
+}
+
+uint32_t distanceToBaseFrequencyContinuous(uint32_t distance) {
+  // Serial.print("Distance (continuous): ");
+  // Serial.println(distance);
+  if (distance < minSoundDistance || distance > maxSoundDistance) {
+    return 0;
+  }
+  uint32_t offsetFrequency = baseNoteFrequencies[0] * (distance - minSoundDistance) / (maxSoundDistance - minSoundDistance);
+  offsetFrequency = min(offsetFrequency, baseNoteFrequencies[0] - 1);
+  return baseNoteFrequencies[0] + offsetFrequency;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// Main
+////////////////////////////////////////////////////////////////////////////////
 
 void setup() {
-  pinMode(trigPin, OUTPUT);  // Sets the trigPin as an Output
-  pinMode(echoPin, INPUT);   // Sets the echoPin as an Input
-  pinMode(buttonPin, INPUT);
-  initialize_tone();
   Serial.begin(1200);  // Starts the serial communication
-}
-
-void initialize_tone() {
-  pmc_set_writeprotect(false);
-  pmc_enable_periph_clk((uint32_t)TC3_IRQn);
-  TC_Configure(TC1, 0, TONE_TIMER_SELECTION | TC_CMR_WAVE | TC_CMR_WAVSEL_UP_RC);
-  // TC_CMR_ACPA_SET: RA compare sets TIOA
-  // TC_CMR_ACPC_CLEAR: RC compare clears TIOA
-  TC1->TC_CHANNEL[0].TC_IER = TC_IER_CPCS;
-  TC1->TC_CHANNEL[0].TC_IDR = ~TC_IER_CPCS;
-  NVIC_EnableIRQ(TC3_IRQn);
-  pinMode(TONE_PIN, OUTPUT);
+  initializeTones();
+  pinMode(modeButtonPin, INPUT);
+  pinMode(ultrasonicTrigPin, OUTPUT);  // Sets the ultrasonicTrigPin as an output
+  pinMode(ultrasonicEchoPin, INPUT);  // Sets the ultrasonicEchoPin as an input
 }
 
 void loop() {
-  button_state = digitalRead(buttonPin);
-  //mode = (buttonstate == HIGH) ? KBD_MODE : TRB_MODE;
-  if (button_state == LOW && prev_button_state == HIGH) {
-    mode = 1 - mode;
+  static uint32_t previousButtonState = LOW;
+  uint32_t buttonState = digitalRead(modeButtonPin);
+  if (previousButtonState == HIGH && buttonState == LOW) {
+    soundMode = (SoundMode)(1 - soundMode);
   }
-  prev_button_state = button_state;
-
-  int base_freq = calc_freq();
-  int octave = force2octave();
-  //Serial.print("Octave: ");
-  //Serial.println(octave);
-  //Serial.print(force2octave());
-  int final_freq = base_freq << octave;
-  // Serial.print("Final freq: ");
-  // Serial.println(final_freq);
-  tone(final_freq);
+  previousButtonState = buttonState;
+  uint32_t baseFrequency = getBaseFrequencyFromDistance();
+  uint32_t octave = getOctaveFromForce();
+  // Serial.print("Octave: ");
+  // Serial.println(octave);
+  // Serial.print(getOctaveFromForce());
+  uint32_t finalFrequency = baseFrequency << octave;
+  // Serial.print("Final frequency: ");
+  // Serial.println(finalFrequency);
+  harmonyTones[0].set(finalFrequency, 4096 - 1);
   delay(100);
-}
-
-void tone(uint32_t frequency) {
-  TC_Stop(TC1, 0);
-  if (frequency == 0) {
-    digitalWrite(TONE_PIN, LOW);
-    return;
-  }
-  TC_SetRC(TC1, 0, VARIANT_MCK / (TONE_TIMER_DIVISOR * 2) / frequency);
-  TC_Start(TC1, 0);
-}
-
-void TC3_Handler() {
-  static uint32_t pin_state = 0;
-  TC_GetStatus(TC1, 0);
-  pin_state = !pin_state;
-  digitalWrite(TONE_PIN, pin_state);
 }
