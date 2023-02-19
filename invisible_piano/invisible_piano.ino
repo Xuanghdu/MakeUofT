@@ -1,16 +1,21 @@
-#define FORCE_SENSOR_PIN A0 // the FSR and 10K pulldown are connected to A0
+#define FORCE_SENSOR_PIN A0  // the FSR and 10K pulldown are connected to A0
 
 // define mode
 #define KBD_MODE 0
 #define TRB_MODE 1
 
-//#define MODE TRB_MODE 
+//#define MODE TRB_MODE
+
+#define TONE_TIMER_SELECTION TC_CMR_TCCLKS_TIMER_CLOCK4
+#define TONE_TIMER_DIVISOR 128
+#define TONE_PIN 8
+#define WHOLE_NOTE_DURATION 1000
 
 // defines pins numbers
 const int trigPin = 6;
 const int echoPin = 7;
 const int buttonPin = 2;
-const unsigned long timeout = 1000000l; // default is 1 second (1000000 us)
+const unsigned long timeout = 1000000l;  // default is 1 second (1000000 us)
 int mode = 0, button_state, prev_button_state;
 
 int calc_dist() {
@@ -58,16 +63,16 @@ int dist_to_freq_trb(int dist, int start_dist, int end_dist, int min_freq, int m
 
 int calc_freq() {
   int dist = calc_dist();
-  
+
   //Serial.print("Distance: ");
   //Serial.println(dist);
 
-  int start_dist = 50, end_dist = 650;
+  int start_dist = 100, end_dist = 1300;
 
   if (mode == KBD_MODE) {
-    int freq_table[12] = {131,139,147,156,165,175,185,196,208,220,233,247};
+    int freq_table[12] = { 131, 139, 147, 156, 165, 175, 185, 196, 208, 220, 233, 247 };
     return dist_to_freq_kbd(dist, start_dist, end_dist, freq_table);
-  } else { // MODE == TRB_MODE
+  } else {  // MODE == TRB_MODE
     int min_freq = 131, max_freq = 262;
     return dist_to_freq_trb(dist, start_dist, end_dist, min_freq, max_freq);
   }
@@ -77,19 +82,32 @@ int calc_freq() {
 int force2octave() {
   int analogReading = analogRead(FORCE_SENSOR_PIN);
   // Serial.print(analogReading); // print the raw analog reading
-  if (analogReading < 24)       
+  if (analogReading < 24)
     return 0;
-  else if (analogReading > 1000) 
+  else if (analogReading > 1000)
     return 2;
   else
     return 1;
 }
 
 void setup() {
-  pinMode(trigPin, OUTPUT); // Sets the trigPin as an Output
-  pinMode(echoPin, INPUT); // Sets the echoPin as an Input
+  pinMode(trigPin, OUTPUT);  // Sets the trigPin as an Output
+  pinMode(echoPin, INPUT);   // Sets the echoPin as an Input
   pinMode(buttonPin, INPUT);
-  Serial.begin(1200); // Starts the serial communication
+  initialize_tone();
+  Serial.begin(1200);  // Starts the serial communication
+}
+
+void initialize_tone() {
+  pmc_set_writeprotect(false);
+  pmc_enable_periph_clk((uint32_t)TC3_IRQn);
+  TC_Configure(TC1, 0, TONE_TIMER_SELECTION | TC_CMR_WAVE | TC_CMR_WAVSEL_UP_RC);
+  // TC_CMR_ACPA_SET: RA compare sets TIOA
+  // TC_CMR_ACPC_CLEAR: RC compare clears TIOA
+  TC1->TC_CHANNEL[0].TC_IER = TC_IER_CPCS;
+  TC1->TC_CHANNEL[0].TC_IDR = ~TC_IER_CPCS;
+  NVIC_EnableIRQ(TC3_IRQn);
+  pinMode(TONE_PIN, OUTPUT);
 }
 
 void loop() {
@@ -103,11 +121,28 @@ void loop() {
   int base_freq = calc_freq();
   int octave = force2octave();
   //Serial.print("Octave: ");
-  //Serial.println(octave); 
+  //Serial.println(octave);
   //Serial.print(force2octave());
   int final_freq = base_freq << octave;
-  Serial.print("Final freq: ");
-  Serial.println(final_freq);
+  // Serial.print("Final freq: ");
+  // Serial.println(final_freq);
+  tone(final_freq);
+  delay(100);
+}
 
-  delay(200);
+void tone(uint32_t frequency) {
+  TC_Stop(TC1, 0);
+  if (frequency == 0) {
+    digitalWrite(TONE_PIN, LOW);
+    return;
+  }
+  TC_SetRC(TC1, 0, VARIANT_MCK / (TONE_TIMER_DIVISOR * 2) / frequency);
+  TC_Start(TC1, 0);
+}
+
+void TC3_Handler() {
+  static uint32_t pin_state = 0;
+  TC_GetStatus(TC1, 0);
+  pin_state = !pin_state;
+  digitalWrite(TONE_PIN, pin_state);
 }
