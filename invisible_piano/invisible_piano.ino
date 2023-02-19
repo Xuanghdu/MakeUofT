@@ -143,7 +143,7 @@ uint32_t detectDistance() {
   // If no pulse is received before the timeout, returns 0
   uint32_t duration = pulseIn(ultrasonicEchoPin, HIGH, ultrasonicTimeout);
   // Calculating the distance in centimeters
-  return (uint32_t)(duration * (0.34 / 2));
+  return (uint32_t)((duration + 10) * (0.34 / 2) / 1.15);
 }
 
 uint32_t distanceToBaseFrequencyDiscrete(uint32_t distance) {
